@@ -14,3 +14,15 @@ services:
       interval: 1s
       timeout: 3s
       retries: 30
+  go:
+    image: golang:1.25.14@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80
+    profiles: [diff]
+    working_dir: /work/go
+    command: go test ./... -count=1
+    volumes:
+      - ./go:/work/go:ro
+      - go-mod:/go/pkg/mod
+      - go-build:/root/.cache/go-build
+volumes:
+  go-mod:
+  go-build:
