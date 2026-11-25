@@ -12,10 +12,11 @@ JOIN v_pret_a_jour a USING (jeton);
 -- the borrow limit (LTV) and the liquidation threshold. The POC follows the book.
 CREATE VIEW v_compte AS
 SELECT v.compte,
-       SUM(div_bas(div_bas(v.depot * x.prix, 1e18) * v.taux_garantie, 1e18)) AS max_empruntable,
-       SUM(div_haut(v.dette * x.prix, 1e18)) AS dette
+       SUM(CASE WHEN v.depot > 0
+                THEN div_bas(div_bas(v.depot * prix_garantie(v.jeton), 1e18) * v.taux_garantie, 1e18) ELSE 0 END) AS max_empruntable,
+       SUM(CASE WHEN v.dette > 0
+                THEN div_haut(v.dette * prix(v.jeton), 1e18) ELSE 0 END) AS dette
 FROM v_position v
-CROSS JOIN LATERAL (SELECT prix(v.jeton) AS prix) x
 WHERE v.depot > 0 OR v.dette > 0
 GROUP BY v.compte;
 
@@ -35,7 +36,10 @@ DECLARE
   a_dette v_pret_a_jour; a_collat v_pret_a_jour;
   parts_max numeric; paiement numeric; saisie numeric; parts_saisies numeric;
 BEGIN
-  PERFORM verrouiller_compte(debiteur);
+  IF parts = 0 THEN RAISE EXCEPTION 'PARTS_NULLES'; END IF;
+  -- The seizure feeds the liquidator's own account: lock both rows, in name order.
+  PERFORM verrouiller_compte(LEAST(debiteur COLLATE "C", session_user::text));
+  PERFORM verrouiller_compte(GREATEST(debiteur COLLATE "C", session_user::text));
   PERFORM verrouiller_prets(jeton_dette, jeton_collateral);
   PERFORM accumuler(jeton_dette);
   PERFORM accumuler(jeton_collateral);
@@ -47,9 +51,11 @@ BEGIN
   SELECT div_bas(parts_dette * dette_pool.close_factor, 1e18) INTO parts_max
     FROM pret_position WHERE compte = debiteur AND jeton = jeton_dette FOR UPDATE;
   IF parts_max IS NULL OR parts > parts_max THEN RAISE EXCEPTION 'CLOSE_FACTOR'; END IF;
+  IF prix(jeton_collateral) = 0 THEN RAISE EXCEPTION 'PAS_DE_PRIX'; END IF;
   paiement := div_haut(parts * a_dette.dette_totale, a_dette.parts_dette_total);
   saisie := div_bas(paiement * prix(jeton_dette) * collat_pool.prime_liquidation,
                     prix(jeton_collateral) * 1e18);
+  IF a_collat.depot_total = 0 THEN RAISE EXCEPTION 'COLLATERAL_INSUFFISANT'; END IF;
   parts_saisies := div_bas(saisie * a_collat.parts_depot_total, a_collat.depot_total);
   UPDATE pret_position SET parts_depot = parts_depot - parts_saisies
    WHERE compte = debiteur AND jeton = jeton_collateral AND parts_depot >= parts_saisies;
