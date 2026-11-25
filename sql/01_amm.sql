@@ -9,6 +9,7 @@ CREATE TABLE pool (
   prix1_cumule       uint256 NOT NULL DEFAULT 0,
   parts_total        uint256 NOT NULL DEFAULT 0,
   frais_pour_mille   int NOT NULL DEFAULT 3 CHECK (frais_pour_mille BETWEEN 0 AND 999),
+  flash_en_cours     boolean NOT NULL DEFAULT false,
   CHECK (jeton0 <> jeton1)
 );
 
@@ -29,8 +30,12 @@ $$;
 CREATE FUNCTION pool_verrouille(id_pool int) RETURNS pool LANGUAGE plpgsql AS $$
 DECLARE p pool;
 BEGIN
+  -- A shared lock on the clock row: a snapshot older than the current block gets 40001 instead of a stale hour.
+  PERFORM 1 FROM chaine FOR SHARE;
   SELECT * INTO p FROM pool WHERE id = id_pool FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'POOL_INCONNU'; END IF;
+  -- Restoring the reserves during a flash swap would pass a reserves check, so the pool is shut by a flag.
+  IF p.flash_en_cours THEN RAISE EXCEPTION 'UniswapV2: LOCKED'; END IF;
   RETURN p;
 END $$;
 
@@ -103,6 +108,7 @@ DECLARE
   sortie numeric;
 BEGIN
   IF NOT achat_de_jeton1 AND jeton_entree <> p.jeton1 THEN RAISE EXCEPTION 'JETON_INCONNU'; END IF;
+  IF p.reserve0 = 0 OR p.reserve1 = 0 THEN RAISE EXCEPTION 'INSUFFICIENT_LIQUIDITY'; END IF;
   sortie := CASE WHEN achat_de_jeton1
                  THEN montant_sortie(entree, p.reserve0, p.reserve1, p.frais_pour_mille)
                  ELSE montant_sortie(entree, p.reserve1, p.reserve0, p.frais_pour_mille) END;
@@ -147,9 +153,12 @@ DECLARE
   p pool := pool_verrouille(id_pool);
   solde0 numeric := solde_de(caisse(id_pool), p.jeton0);
   solde1 numeric := solde_de(caisse(id_pool), p.jeton1);
-  sortie0 numeric := div_bas(a_retirer * solde0, p.parts_total);
-  sortie1 numeric := div_bas(a_retirer * solde1, p.parts_total);
+  sortie0 numeric;
+  sortie1 numeric;
 BEGIN
+  IF p.parts_total = 0 THEN RAISE EXCEPTION 'PARTS_INSUFFISANTES'; END IF;
+  sortie0 := div_bas(a_retirer * solde0, p.parts_total);
+  sortie1 := div_bas(a_retirer * solde1, p.parts_total);
   IF sortie0 = 0 OR sortie1 = 0 THEN RAISE EXCEPTION 'INSUFFICIENT_LIQUIDITY_BURNED'; END IF;
   UPDATE part_lp SET parts = parts - a_retirer
    WHERE pool_id = id_pool AND compte = session_user AND parts >= a_retirer;

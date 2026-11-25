@@ -3,9 +3,7 @@ CREATE TABLE flash_swap (
   pool_id        int NOT NULL REFERENCES pool,
   compte         text NOT NULL,
   sortie0        uint256 NOT NULL,
-  sortie1        uint256 NOT NULL,
-  reserve0_avant uint112 NOT NULL,
-  reserve1_avant uint112 NOT NULL
+  sortie1        uint256 NOT NULL
 );
 
 -- The tokens leave now; the repayment is checked at COMMIT by the deferred trigger below.
@@ -17,17 +15,18 @@ BEGIN
   IF sortie0 >= p.reserve0 OR sortie1 >= p.reserve1 THEN RAISE EXCEPTION 'INSUFFICIENT_LIQUIDITY'; END IF;
   PERFORM deplacer(caisse(id_pool), session_user::text, p.jeton0, sortie0);
   PERFORM deplacer(caisse(id_pool), session_user::text, p.jeton1, sortie1);
-  INSERT INTO flash_swap (pool_id, compte, sortie0, sortie1, reserve0_avant, reserve1_avant)
-  VALUES (id_pool, session_user, sortie0, sortie1, p.reserve0, p.reserve1);
+  -- Before the insert: under SET CONSTRAINTS IMMEDIATE the check runs at the end of the insert and clears the flag.
+  UPDATE pool SET flash_en_cours = true WHERE id = id_pool;
+  INSERT INTO flash_swap (pool_id, compte, sortie0, sortie1)
+  VALUES (id_pool, session_user, sortie0, sortie1);
 END $$;
 
 CREATE FUNCTION verifier_flash_swap() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE p pool := pool_verrouille(NEW.pool_id);
+DECLARE p pool;
 BEGIN
-  -- Reserves moved since the loan: someone re-entered the pool (the "lock" of UniswapV2Pair).
-  IF p.reserve0 <> NEW.reserve0_avant OR p.reserve1 <> NEW.reserve1_avant THEN
-    RAISE EXCEPTION 'UniswapV2: LOCKED';
-  END IF;
+  -- The row is already locked by flash_swap in this transaction; pool_verrouille would refuse the flag.
+  SELECT * INTO p FROM pool WHERE id = NEW.pool_id;
+  UPDATE pool SET flash_en_cours = false WHERE id = NEW.pool_id;
   PERFORM valider_swap(p, NEW.sortie0, NEW.sortie1);
   RETURN NULL;
 END $$;

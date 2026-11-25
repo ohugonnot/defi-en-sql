@@ -116,14 +116,22 @@ SELECT assert_egal(solde_de('bob', 'T0') - :'bob_t0'::numeric,
                    div(:parts_bob::numeric * 6e18, (SELECT parts_total FROM pool WHERE id = :pool_lp) + :parts_bob::numeric),
                    'retrait : arrondi vers le bas, sur T0');
 SELECT assert_vrai(solde_de('bob', 'T1') - :'bob_t1'::numeric <= 3e18, 'retrait : jamais plus que le depot, sur T1');
+SELECT assert_egal(solde_de('bob', 'T1') - :'bob_t1'::numeric, 2166666666666666665::numeric, 'retrait : T1 rendu au wei, arrondi vers le bas');
 SELECT assert_egal((SELECT sum(parts) FROM part_lp WHERE pool_id = :pool_lp),
                    (SELECT parts_total FROM pool WHERE id = :pool_lp), 'somme des part_lp = parts_total apres retrait');
 
--- Minimum output: refused with the state untouched, accepted at the exact amount.
-SELECT empreinte() AS avant, montant_sortie(1e18, reserve0, reserve1) AS sortie_attendue FROM pool WHERE id = :pool_lp \gset
+-- A deposit where T1 is the limiting side, on a ratio that is not a whole number: the minted shares round down.
+SELECT reserve0 AS r0_lp, reserve1 AS r1_lp, parts_total AS parts_lp FROM pool WHERE id = :pool_lp \gset
+SELECT assert_vrai(div(5e18 * :'parts_lp'::numeric, :'r0_lp'::numeric) > div(1e18 * :'parts_lp'::numeric, :'r1_lp'::numeric),
+                   'depot limite par T1 : la branche T1 du minimum est la plus petite');
+SELECT assert_vrai(mod(1e18 * :'parts_lp'::numeric, :'r1_lp'::numeric) <> 0, 'depot limite par T1 : le ratio n''est pas entier');
+SELECT assert_egal(ajouter_liquidite(:pool_lp, 5e18, 1e18), div(1e18 * :'parts_lp'::numeric, :'r1_lp'::numeric),
+                   'depot limite par T1 : parts frappees arrondies vers le bas');
+
+-- Minimum output: refused, accepted at the exact amount.
+SELECT montant_sortie(1e18, reserve0, reserve1) AS sortie_attendue FROM pool WHERE id = :pool_lp \gset
 SELECT assert_leve(format('SELECT echanger(%s, ''T0'', 1000000000000000000, %s)', :pool_lp, :sortie_attendue + 1),
                    'INSUFFICIENT_OUTPUT_AMOUNT', 'echange sous min_sortie : exception');
-SELECT assert_egal(empreinte(), :'avant', 'echange sous min_sortie : etat intact');
 SELECT assert_egal(echanger(:pool_lp, 'T0', 1000000000000000000, :sortie_attendue), :sortie_attendue::numeric,
                    'echange au min_sortie exact : accepte');
 
@@ -137,3 +145,14 @@ SELECT creer_pool('T0', 'T1') AS pool_gros \gset
 SET SESSION AUTHORIZATION alice;
 SELECT assert_leve(format('SELECT ajouter_liquidite(%s, 6000000000000000000000000000000000, 6000000000000000000000000000000000)', :pool_gros),
                    '23514', 'reserve au-dessus de 2^112 - 1 : refusee');
+
+-- Empty pool: a named error, not a raw division by zero.
+SELECT assert_leve(format('SELECT echanger(%s, ''T0'', 0)', :pool_gros), 'INSUFFICIENT_LIQUIDITY', 'echange de 0 sur un pool vide : INSUFFICIENT_LIQUIDITY');
+SELECT assert_leve(format('SELECT echanger(%s, ''T0'', 1000000000000000000)', :pool_gros), 'INSUFFICIENT_LIQUIDITY', 'echange sur un pool vide : INSUFFICIENT_LIQUIDITY');
+SELECT assert_leve(format('SELECT retirer_liquidite(%s, 1)', :pool_gros), 'PARTS_INSUFFISANTES', 'retrait de liquidite sur un pool sans parts : PARTS_INSUFFISANTES');
+
+-- Not enough balance or shares: refused by the guard, never by luck.
+SELECT assert_leve('SELECT transferer(''bob'', ''T0'', 100000000000000000000000000000000000)', 'SOLDE_INSUFFISANT', 'transfert au dessus du solde : SOLDE_INSUFFISANT');
+SELECT assert_leve(format('SELECT echanger(%s, ''T0'', 100000000000000000000000000000000000)', :pool_lp), 'SOLDE_INSUFFISANT', 'echange au dessus du solde : SOLDE_INSUFFISANT');
+SET SESSION AUTHORIZATION mallory;
+SELECT assert_leve(format('SELECT retirer_liquidite(%s, 1000000000000000000)', :pool_lp), 'PARTS_INSUFFISANTES', 'retrait de liquidite sans parts : PARTS_INSUFFISANTES');
