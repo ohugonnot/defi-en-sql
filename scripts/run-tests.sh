@@ -8,6 +8,11 @@ psql_base=(psql -X -q -U postgres -v ON_ERROR_STOP=1)
 tmp=$(mktemp -d)
 trap 'for d in "${bases[@]:-}"; do [ -n "$d" ] && psql -X -q -U postgres -d postgres -c "DROP DATABASE IF EXISTS \"$d\" WITH (FORCE)" >/dev/null 2>&1; done; rm -rf "$tmp"' EXIT
 bases=()
+# A SELECT assert_...() FROM t WHERE ... passes silently on zero rows: the count of each file is pinned. Update it with the tests.
+declare -A attendu=(
+  [t01_amm.sql]=55 [t02_flash_swap.sql]=20 [t03_pret.sql]=33 [t04_liquidation.sql]=27 [t05_oracle_attaque.sql]=13 [t06_droits.sql]=21
+  [t07_concurrence.sql]=64 [t08_sandwich.sql]=11 [t09_oracle_fraicheur.sql]=34 [t10_arrondis_pret.sql]=25 [t11_accumulation_interets.sql]=16
+)
 
 if [ -z "${SKIP_DIVISION_CHECK:-}" ]; then
   # A "/" on numeric rounds to nearest. Any hit here is a bug.
@@ -44,7 +49,9 @@ for t in "${tests[@]}"; do
   nom=$(basename "$t")
   code=$(cat "$tmp/$nom.code")
   verts=$(grep -c 'NOTICE:  ok' "$tmp/$nom.log")
-  if [ "$code" = 0 ]; then
+  if [ "$code" = 0 ] && [ "$verts" != "${attendu[$nom]:-}" ]; then
+    rouges=$((rouges + 1)); echo "ROUGE $nom : $verts assertions au lieu de ${attendu[$nom]:-aucune attendue}"
+  elif [ "$code" = 0 ]; then
     echo "vert  $nom ($verts assertions)"; total=$((total + verts))
   else
     rouges=$((rouges + 1))
