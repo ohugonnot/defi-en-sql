@@ -23,8 +23,8 @@ BEGIN
   FOR f IN SELECT oid::regprocedure FROM pg_proc
             WHERE pronamespace = 'public'::regnamespace AND prokind = 'f'
               AND proname IN ('div_bas', 'div_haut', 'racine_entiere', 'q112', 'solde_de', 'caisse', 'masse',
-                              'empreinte', 'montant_sortie', 'cumule_a_jour', 'pool_weth', 'prix', 'prix_instantane',
-                              'prix_moyen', 'est_sain', 'taux_emprunt', 'assert_egal', 'assert_vrai', 'assert_leve')
+                              'montant_sortie', 'cumule_a_jour', 'pool_weth', 'prix', 'prix_garantie', 'prix_instantane',
+                              'prix_moyen', 'est_sain', 'taux_emprunt', 'assert_egal', 'assert_vrai', 'assert_leve', 'assert_passe')
   LOOP
     EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO PUBLIC', f);
   END LOOP;
