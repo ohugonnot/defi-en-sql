@@ -32,6 +32,13 @@ SELECT deposer('COL', 1250e18);
 SELECT emprunter('WETH', 800e18);
 SELECT assert_egal(utilisation, 0.8e18, 'utilisation 80 %') FROM v_taux WHERE jeton = 'WETH';
 
+-- The cap is 1250 COL x 0.8 = 1000 WETH: borrowing 200 more lands exactly on it, one wei more is refused.
+BEGIN;
+SELECT assert_passe('SELECT emprunter(''WETH'', 200000000000000000000)', 'emprunter exactement le plafond passe');
+-- 1 wei of COL, not of WETH: the WETH vault is empty by now and would refuse for lack of cash before the health check.
+SELECT assert_leve('SELECT emprunter(''COL'', 1)', 'ACCOUNT_UNHEALTHY', 'au plafond : un wei de dette en plus est refuse');
+ROLLBACK;
+
 -- One year at 9 %: 800 x 9 % = 72 WETH of interest, booked by a single UPDATE.
 RESET SESSION AUTHORIZATION;
 SELECT avancer_bloc(1, 31536000);
@@ -94,3 +101,43 @@ SET SESSION AUTHORIZATION alice;
 SELECT rembourser('WETH', parts_dette) FROM pret_position WHERE compte = 'alice' AND jeton = 'WETH';
 SELECT assert_egal(total_emprunte, 0::numeric, 'tout rembourse : plus aucune dette dans le vault') FROM pret_pool WHERE jeton = 'WETH';
 SELECT assert_egal(parts_dette_total, 0::numeric, 'tout rembourse : plus aucune part de dette') FROM pret_pool WHERE jeton = 'WETH';
+
+-- No debt, no price needed: a depositor of a token without a price pool can still withdraw it.
+RESET SESSION AUTHORIZATION;
+SELECT frapper('bob', 'U0', 10e18), frapper('alice', 'U0', 10e18);
+SET SESSION AUTHORIZATION bob;
+SELECT deposer('U0', 10e18);
+-- A deposit nobody can price is worth 0: it blocks nobody, not even the view of unhealthy accounts.
+SELECT assert_passe('SELECT count(*) FROM v_compte_malsain', 'depot sans prix : la vue des comptes malsains ne leve pas');
+-- The vault holds 100 U0 of its own, so 10 shares are worth 110 and 5 shares 55.
+SELECT assert_egal(retirer('U0', 5e18), 55e18, 'sans dette : retrait partiel d''un jeton sans prix accepte');
+-- With a debt the unpriced deposit is worth 0 too: still withdrawable, with no borrowing power.
+SET SESSION AUTHORIZATION alice;
+SELECT emprunter('WETH', 1e18);
+SELECT deposer('U0', 10e18);
+SELECT assert_passe('SELECT retirer(''U0'', 100000000000000000)', 'avec dette : retrait d''un collateral sans prix accepte, il vaut 0');
+-- The debt side stays strict: nobody borrows a token that has no price.
+SELECT assert_leve('SELECT emprunter(''U0'', 1)', 'PAS_DE_PRIX', 'dette sans prix : emprunter un jeton non cote refuse');
+
+-- Empty vaults: a named error, not a raw division by zero.
+SELECT assert_leve('SELECT retirer(''U100'', 1)', 'PARTS_INSUFFISANTES', 'retrait sur un coffre sans depot : PARTS_INSUFFISANTES');
+SELECT assert_leve('SELECT rembourser(''U0'', 1)', 'PARTS_INSUFFISANTES', 'remboursement sur un coffre sans dette : PARTS_INSUFFISANTES');
+
+-- Not enough balance or shares: refused by the guard.
+SET SESSION AUTHORIZATION alice;
+SELECT assert_leve('SELECT deposer(''WETH'', 10000000000000000000000000000000000000000)', 'SOLDE_INSUFFISANT', 'depot au dessus du solde : SOLDE_INSUFFISANT');
+SELECT assert_leve('SELECT retirer(''WETH'', 1000000000000000000)', 'PARTS_INSUFFISANTES', 'retrait sans parts de depot : PARTS_INSUFFISANTES');
+SET SESSION AUTHORIZATION bob;
+SELECT assert_leve('SELECT rembourser(''WETH'', 1000000000000000000)', 'PARTS_INSUFFISANTES', 'remboursement sans parts de dette : PARTS_INSUFFISANTES');
+
+-- Invariant: the shares held by positions add up to the vault totals.
+RESET SESSION AUTHORIZATION;
+SELECT assert_vrai(count(*) > 0 AND bool_and(p.parts_depot_total = coalesce(s.depot, 0) AND p.parts_dette_total = coalesce(s.dette, 0)),
+                   'somme des parts des positions = totaux des vaults')
+  FROM pret_pool p LEFT JOIN (SELECT jeton, sum(parts_depot) AS depot, sum(parts_dette) AS dette FROM pret_position GROUP BY jeton) s USING (jeton);
+
+-- A gift to a vault's cash box would move its share price without the vault row lock.
+SET SESSION AUTHORIZATION alice;
+SELECT assert_leve('SELECT transferer(''pret:WETH'', ''WETH'', 1)', 'TRANSFERT_VERS_COFFRE', 'transfert vers la caisse du coffre WETH : refuse');
+SELECT assert_leve('SELECT transferer(''pret:COL'', ''COL'', 1)', 'TRANSFERT_VERS_COFFRE', 'transfert vers la caisse du coffre COL : refuse');
+RESET SESSION AUTHORIZATION;

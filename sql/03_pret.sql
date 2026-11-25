@@ -66,14 +66,19 @@ CROSS JOIN LATERAL (SELECT div_haut(p.total_emprunte * t.taux_emprunt * (c.horod
 -- SERIALIZABLE get 40001 (an advisory lock would not refresh the snapshot). Always taken before any vault lock.
 CREATE TABLE compte (nom text PRIMARY KEY, version bigint NOT NULL);
 
-CREATE FUNCTION verrouiller_compte(un_compte text) RETURNS void LANGUAGE sql AS $$
+CREATE FUNCTION verrouiller_compte(un_compte text) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  -- The prices behind the health check are rows too: a snapshot older than a trade gets 40001.
+  -- Pools before the account row removes one deadlock and leaves its mirror (row held, then a pool FOR UPDATE): 40P01, retry.
+  PERFORM 1 FROM pool WHERE jeton0 = 'WETH' OR jeton1 = 'WETH' ORDER BY id FOR SHARE;
   INSERT INTO compte (nom, version) VALUES (un_compte, 1)
-  ON CONFLICT (nom) DO UPDATE SET version = compte.version + 1
-$$;
+  ON CONFLICT (nom) DO UPDATE SET version = compte.version + 1;
+END $$;
 
 -- Vault locks in key order, so two calls asking for the same vaults in different orders cannot deadlock.
 CREATE FUNCTION verrouiller_prets(VARIADIC jetons text[]) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
+  PERFORM 1 FROM chaine FOR SHARE;
   PERFORM 1 FROM pret_pool WHERE jeton = ANY (jetons) ORDER BY jeton FOR UPDATE;
   IF (SELECT count(*) FROM pret_pool WHERE jeton = ANY (jetons)) <> (SELECT count(DISTINCT j) FROM unnest(jetons) j) THEN
     RAISE EXCEPTION 'PRET_POOL_INCONNU';
@@ -92,6 +97,7 @@ END $$;
 CREATE FUNCTION deposer(jeton_pret text, montant uint256) RETURNS numeric LANGUAGE plpgsql AS $$
 DECLARE a v_pret_a_jour; parts numeric;
 BEGIN
+  PERFORM verrouiller_compte(session_user::text);
   PERFORM accumuler(jeton_pret);
   SELECT * INTO a FROM v_pret_a_jour WHERE jeton = jeton_pret;
   parts := CASE WHEN a.parts_depot_total = 0 THEN montant
@@ -110,6 +116,7 @@ BEGIN
   PERFORM verrouiller_compte(session_user::text);
   PERFORM accumuler(jeton_pret);
   SELECT * INTO a FROM v_pret_a_jour WHERE jeton = jeton_pret;
+  IF a.parts_depot_total = 0 THEN RAISE EXCEPTION 'PARTS_INSUFFISANTES'; END IF;
   montant := div_bas(parts * a.depot_total, a.parts_depot_total);
   UPDATE pret_position SET parts_depot = parts_depot - retirer.parts
    WHERE compte = session_user AND jeton = jeton_pret AND parts_depot >= retirer.parts;
@@ -141,8 +148,10 @@ END $$;
 CREATE FUNCTION rembourser(jeton_pret text, parts uint256) RETURNS numeric LANGUAGE plpgsql AS $$
 DECLARE a v_pret_a_jour; montant numeric;
 BEGIN
+  PERFORM verrouiller_compte(session_user::text);
   PERFORM accumuler(jeton_pret);
   SELECT * INTO a FROM v_pret_a_jour WHERE jeton = jeton_pret;
+  IF a.parts_dette_total = 0 THEN RAISE EXCEPTION 'PARTS_INSUFFISANTES'; END IF;
   montant := div_haut(parts * a.dette_totale, a.parts_dette_total);
   UPDATE pret_position SET parts_dette = parts_dette - rembourser.parts
    WHERE compte = session_user AND jeton = jeton_pret AND parts_dette >= rembourser.parts;

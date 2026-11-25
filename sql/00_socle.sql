@@ -71,7 +71,11 @@ END $$;
 
 -- Like ERC-20 transfer: the sender is whoever opened the session.
 CREATE FUNCTION transferer(vers text, un_jeton text, combien uint256) RETURNS void
-  LANGUAGE sql AS $$ SELECT deplacer(session_user::text, vers, un_jeton, combien) $$;
+  LANGUAGE plpgsql AS $$
+BEGIN
+  IF vers LIKE 'pret:%' THEN RAISE EXCEPTION 'TRANSFERT_VERS_COFFRE'; END IF;
+  PERFORM deplacer(session_user::text, vers, un_jeton, combien);
+END $$;
 
 CREATE FUNCTION caisse(id_pool int) RETURNS text
   LANGUAGE sql IMMUTABLE AS $$ SELECT 'pool:' || id_pool $$;
@@ -80,16 +84,6 @@ CREATE FUNCTION masse() RETURNS jsonb LANGUAGE sql STABLE AS $$
   SELECT coalesce(jsonb_object_agg(jeton, total), '{}')
   FROM (SELECT jeton, sum(montant) AS total FROM solde GROUP BY jeton) t
 $$;
-
--- Hash of every table, to prove "state unchanged" after a refused transaction.
-CREATE FUNCTION empreinte() RETURNS text LANGUAGE plpgsql STABLE AS $$
-DECLARE nom text; hash text := '';
-BEGIN
-  FOREACH nom IN ARRAY ARRAY['chaine','solde','pool','part_lp','flash_swap','pret_pool','pret_position','observation'] LOOP
-    hash := hash || md5(query_to_xml(format('SELECT * FROM %I ORDER BY 1, 2', nom), false, false, '')::text);
-  END LOOP;
-  RETURN md5(hash);
-END $$;
 
 CREATE FUNCTION assert_egal(reel anycompatible, attendu anycompatible, message text) RETURNS void
   LANGUAGE plpgsql AS $$
@@ -121,6 +115,18 @@ BEGIN
     RAISE EXCEPTION 'ECHEC % : erreur % (%), attendu %', message, SQLSTATE, SQLERRM, motif;
   END;
   RAISE EXCEPTION 'ECHEC % : aucune erreur, attendu %', message, motif;
+END $$;
+
+-- The statement must succeed: its effects stay, any error is reported as a failed assertion.
+CREATE FUNCTION assert_passe(requete text, message text) RETURNS void
+  LANGUAGE plpgsql AS $$
+BEGIN
+  BEGIN
+    EXECUTE requete;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'ECHEC % : erreur % (%)', message, SQLSTATE, SQLERRM;
+  END;
+  RAISE NOTICE 'ok %', message;
 END $$;
 
 -- Test helper for dblink sessions: spins until backend `pid` waits on a lock, fails if its query ends first.

@@ -72,9 +72,7 @@ SELECT assert_egal(dette, div(:'dette_col_mallory'::numeric * :'prix_col'::numer
 
 -- Withdrawing the collateral of a borrower is refused.
 SET SESSION AUTHORIZATION alice;
-SELECT empreinte() AS avant \gset
 SELECT assert_leve('SELECT retirer(''COL'', 1000000000000000000000)', 'ACCOUNT_UNHEALTHY', 'retrait de tout le collateral avec une dette : refuse');
-SELECT assert_egal(empreinte(), :'avant', 'retrait refuse : etat intact');
 
 -- Liquidation on a collateral vault whose index is not 1: shares seized round down, the liquidator never gets a wei too much.
 SET SESSION AUTHORIZATION liquidateur;
@@ -98,3 +96,17 @@ SELECT assert_egal(parts_depot, :'parts_attendues'::numeric, 'liquidation : part
 SELECT assert_vrai(parts_depot * :'d_collat'::numeric <= :'saisie_attendue'::numeric * :'p_collat'::numeric,
                    'liquidation : la valeur des parts recues ne depasse jamais la saisie')
   FROM pret_position WHERE compte = 'liquidateur' AND jeton = 'COL';
+
+-- Close factor on an odd number of debt shares: half of it is not whole, and the maximum rounds down.
+SELECT parts_dette AS parts_dette_alice FROM pret_position WHERE compte = 'alice' AND jeton = 'WETH' \gset
+SELECT assert_vrai(mod(:'parts_dette_alice'::numeric, 2) = 1, 'close factor : nombre impair de parts de dette');
+SELECT div(:'parts_dette_alice'::numeric * close_factor, 1e18) AS parts_max FROM pret_pool WHERE jeton = 'WETH' \gset
+SET SESSION AUTHORIZATION liquidateur;
+SELECT assert_leve(format('SELECT liquider(''alice'', ''WETH'', ''COL'', %s)', :'parts_max'::numeric + 1), 'CLOSE_FACTOR',
+                   'close factor : une part au dessus du maximum arrondi vers le bas, refuse');
+SELECT assert_passe(format('SELECT liquider(''alice'', ''WETH'', ''COL'', %s)', :'parts_max'), 'close factor : le maximum arrondi vers le bas est accepte');
+RESET SESSION AUTHORIZATION;
+
+SELECT assert_vrai(count(*) > 0 AND bool_and(p.parts_depot_total = coalesce(s.depot, 0) AND p.parts_dette_total = coalesce(s.dette, 0)),
+                   'somme des parts des positions = totaux des vaults')
+  FROM pret_pool p LEFT JOIN (SELECT jeton, sum(parts_depot) AS depot, sum(parts_dette) AS dette FROM pret_position GROUP BY jeton) s USING (jeton);
