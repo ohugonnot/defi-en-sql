@@ -10,7 +10,7 @@ services:
     volumes:
       - .:/work:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -h 127.0.0.1"]
       interval: 1s
       timeout: 3s
       retries: 30
@@ -18,9 +18,16 @@ services:
     image: golang:1.25.14@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80
     profiles: [diff]
     working_dir: /work/go
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: postgres
     command: go test ./... -count=1
     volumes:
       - ./go:/work/go:ro
+      - ./sql:/work/sql:ro
       - go-mod:/go/pkg/mod
       - go-build:/root/.cache/go-build
 volumes:

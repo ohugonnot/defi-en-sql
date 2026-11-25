@@ -35,6 +35,11 @@ func puissance10(exposant int64) *big.Int {
 	return new(big.Int).Exp(big.NewInt(10), big.NewInt(exposant), nil)
 }
 
+// offreInitiale is the supply of each token, all held by the trader; far below the uint112 reserve limit.
+func offreInitiale() *big.Int {
+	return puissance10(24)
+}
+
 type artefact struct {
 	abi      abi.ABI
 	creation []byte
@@ -127,11 +132,10 @@ func (m *moteurEVM) deployer() error {
 	if m.factory, factory, err = m.deployerContrat(artFactory, m.trader); err != nil {
 		return fmt.Errorf("factory : %w", err)
 	}
-	supply := puissance10(24) // far below the uint112 reserve limit
-	if m.jetonA, _, err = m.deployerContrat(artJeton, supply); err != nil {
+	if m.jetonA, _, err = m.deployerContrat(artJeton, offreInitiale()); err != nil {
 		return fmt.Errorf("jeton A : %w", err)
 	}
-	if m.jetonB, _, err = m.deployerContrat(artJeton, supply); err != nil {
+	if m.jetonB, _, err = m.deployerContrat(artJeton, offreInitiale()); err != nil {
 		return fmt.Errorf("jeton B : %w", err)
 	}
 
@@ -267,4 +271,43 @@ func raisonRevert(err error) string {
 		return ""
 	}
 	return raison
+}
+
+func (m *moteurEVM) jeton(i int) *bind.BoundContract {
+	if i == 0 {
+		return m.jeton0
+	}
+	return m.jeton1
+}
+
+// etat reads the reserves and the balances of the pair and of the trader. Sortie stays nil: the bytecode has no quote function.
+func (m *moteurEVM) etat() (Etat, error) {
+	reserve0, reserve1, err := m.reserves()
+	if err != nil {
+		return Etat{}, err
+	}
+	var soldes [2][2]*big.Int
+	for i, proprietaire := range []common.Address{m.paire, m.trader} {
+		for j := range 2 {
+			if soldes[i][j], err = appeler[*big.Int](m.jeton(j), "balanceOf", proprietaire); err != nil {
+				return Etat{}, err
+			}
+		}
+	}
+	return Etat{
+		Reserve0: reserve0, Reserve1: reserve1,
+		SoldePaire0: soldes[0][0], SoldePaire1: soldes[0][1],
+		SoldeTrader0: soldes[1][0], SoldeTrader1: soldes[1][1],
+	}, nil
+}
+
+// raisonEVM is the revert reason of err; an error with no revert data must not look like a success.
+func raisonEVM(err error) string {
+	if err == nil {
+		return ""
+	}
+	if raison := raisonRevert(err); raison != "" {
+		return raison
+	}
+	return "erreur non décodée : " + err.Error()
 }
